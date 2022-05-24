@@ -1,0 +1,5 @@
+(env
+ (dev
+  (flags (:standard -rectypes -warn-error -A)))
+ (_
+  (flags (:standard -rectypes))))

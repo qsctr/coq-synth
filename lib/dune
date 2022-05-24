@@ -1,0 +1,8 @@
+(library
+ (public_name coq_synth)
+ (name coq_synth)
+ (libraries
+  base
+  coq-serapi.serapi_v8_13
+  coq-serapi.serlib
+  coq-serapi.sertop_v8_12))

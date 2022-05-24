@@ -1,0 +1,4 @@
+(executable
+ (public_name coq_synth)
+ (name main)
+ (libraries coq_synth))
