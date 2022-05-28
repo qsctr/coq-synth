@@ -8,9 +8,9 @@ homepage: "https://github.com/qsctr/coq-synth"
 bug-reports: "https://github.com/qsctr/coq-synth/issues"
 depends: [
   "ocaml"
-  "dune" {>= "3.0"}
+  "dune" {>= "2.7"}
   "base"
-  "coq-serapi" {= "8.13.0+0.13.0"}
+  "coq-serapi" {= "8.11.0+0.11.0"}
   "odoc" {with-doc}
 ]
 build: [

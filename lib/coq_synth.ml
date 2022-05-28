@@ -5,11 +5,13 @@ open Sertop
 
 module ConstrHash = struct
   include Constr
-  include Ser_constr
+  let sexp_of_t = Ser_constr.sexp_of_t
 end
 
 module IndHash = struct
-  include Names.Ind.CanOrd
+  type t = Names.inductive
+  let compare = Names.ind_ord
+  let hash = Names.ind_hash
   let sexp_of_t = Ser_names.sexp_of_inductive
 end
 
@@ -70,7 +72,10 @@ let [@warning "-8"] synthesize sid n extra_names =
           for ctor_ix = 1 to n_ctors do
             let ctor = Names.ith_constructor_of_inductive ind ctor_ix in
             let ctor_str =
-              Pp.string_of_ppcmds (Printer.pr_constructor env ctor) in
+              Pp.string_of_ppcmds
+                (Printer.pr_global_env
+                  (Termops.vars_of_env env)
+                  (Names.GlobRef.ConstructRef ctor)) in
             match query (TypeOf ctor_str) with
             | CoqConstr t -> add_var (Constr.mkConstruct ctor) t
           done;
@@ -118,18 +123,14 @@ let load file =
       ; exn_on_opaque = false
       };
   Sertop_init.coq_init
-    { fb_handler = (fun _ _ -> ())
+    { fb_handler = ignore
     ; ml_load = None
     ; debug = false
-    ; allow_sprop = true
-    ; indices_matter = false
-    }
-    Caml.Format.std_formatter;
+    };
   ignore @@ Serapi_protocol.exec_cmd @@ NewDoc
     { top_name = TopLogical
       (Names.DirPath.make [Names.Id.of_string "Coq_synth"])
-    ; ml_load_path = None
-    ; vo_load_path = None
+    ; iload_path = None
     ; require_libs = None
     };
   let sids =

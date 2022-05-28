@@ -1,4 +1,4 @@
-(lang dune 3.0)
+(lang dune 2.7)
 
 (name coq_synth)
 
@@ -20,6 +20,6 @@
   ocaml
   dune
   base
-  (coq-serapi (= 8.13.0+0.13.0))))
+  (coq-serapi (= 8.11.0+0.11.0))))
 
 ; See the complete stanza docs at https://dune.readthedocs.io/en/stable/dune-files.html#dune-project
