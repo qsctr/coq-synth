@@ -71,13 +71,10 @@ let [@warning "-8"] synthesize sid n extra_names =
           let n_ctors = Array.length mind_packets.(snd ind).mind_consnames in
           for ctor_ix = 1 to n_ctors do
             let ctor = Names.ith_constructor_of_inductive ind ctor_ix in
-            let ctor_str =
-              Pp.string_of_ppcmds
-                (Printer.pr_global_env
-                  (Termops.vars_of_env env)
-                  (Names.GlobRef.ConstructRef ctor)) in
-            match query (TypeOf ctor_str) with
-            | CoqConstr t -> add_var (Constr.mkConstruct ctor) t
+            let t, _ =
+              Typeops.type_of_global_in_context env
+                (Names.GlobRef.ConstructRef ctor) in
+            add_var (Constr.mkConstruct ctor) t
           done;
           Hash_set.add ctors_added ind
     in
