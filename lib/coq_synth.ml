@@ -1,26 +1,49 @@
-open Base
 open Serapi
 open Serlib
 open Sertop
 
-module ConstrHash = struct
-  include Constr
-  let sexp_of_t = Ser_constr.sexp_of_t
+let rec last =
+  function
+  | [] -> failwith "last []"
+  | [x] -> x
+  | _::xs -> last xs
+
+module ConstrHashtbl = struct
+  include Hashtbl.Make(Constr)
+
+  let find_or_add ht def k =
+    match find_opt ht k with
+    | Some v -> v
+    | None ->
+      let v = def () in
+      add ht k v;
+      v
+
+  let add_multi ht k v =
+    match find_opt ht k with
+    | Some vs -> replace ht k (v :: vs)
+    | None -> add ht k [v]
+
+  let find_multi ht k =
+    match find_opt ht k with
+    | Some vs -> vs
+    | None -> []
 end
 
 module IndHash = struct
   type t = Names.inductive
-  let compare = Names.ind_ord
+  let equal = Names.eq_ind
   let hash = Names.ind_hash
-  let sexp_of_t = Ser_names.sexp_of_inductive
 end
+module IndHashtbl = Hashtbl.Make(IndHash)
 
 let exec_get cmd =
   match Serapi_protocol.exec_cmd cmd with
   | ObjList [obj] :: _ -> obj
   | x -> failwith @@
-    Sexp.to_string_hum (Sertop_ser.sexp_of_cmd cmd) ^ "\n -> \n" ^
-      Sexp.to_string_hum (List.sexp_of_t Sertop_ser.sexp_of_answer_kind x)
+    Sexplib.Sexp.to_string_hum (Sertop_ser.sexp_of_cmd cmd) ^ "\n -> \n" ^
+      Sexplib.Sexp.to_string_hum
+        (Sexplib.Conv.sexp_of_list Sertop_ser.sexp_of_answer_kind x)
 
 let [@warning "-8"] synthesize sid n extra_names =
   if n < 0 then
@@ -40,31 +63,32 @@ let [@warning "-8"] synthesize sid n extra_names =
   let query q = exec_get (Query (query_opt, q)) in
   match query Env, query Goals with
   | CoqEnv env, CoqGoal {goals = [{ty = goal_type; _}]; _} ->
-    let atoms = Hashtbl.create (module ConstrHash) in
-    let returning = Hashtbl.create (module ConstrHash) in
+    let atoms = ConstrHashtbl.create 16 in
+    let returning = ConstrHashtbl.create 16 in
     let find_returning =
-      Hashtbl.find_or_add returning
-        ~default:(fun () -> Hash_set.create (module ConstrHash)) in
+      ConstrHashtbl.find_or_add returning
+        (fun () -> ConstrHashtbl.create 16) in
     let rec add_returning t =
       match Constr.kind t with
       | Prod (_, _, r) ->
-        Hash_set.add (find_returning r) t;
+        ConstrHashtbl.add (find_returning r) t ();
         add_returning r
       | _ -> ()
     in
     let add_var atom t =
       add_returning t;
-      Hashtbl.add_multi atoms ~key:t ~data:atom
+      ConstrHashtbl.add_multi atoms t atom
     in
-    List.iter extra_names ~f:begin fun name ->
-      match query (TypeOf name) with
-      | CoqConstr t ->
-        let glob_ref = Nametab.locate (Libnames.qualid_of_string name) in
-        add_var (Constr.mkRef (glob_ref, Univ.Instance.empty)) t
-    end;
-    let ctors_added = Hash_set.create (module IndHash) in
+    extra_names |> List.iter
+      begin fun name ->
+        match query (TypeOf name) with
+        | CoqConstr t ->
+          let glob_ref = Nametab.locate (Libnames.qualid_of_string name) in
+          add_var (Constr.mkRef (glob_ref, Univ.Instance.empty)) t
+      end;
+    let ctors_added = IndHashtbl.create 16 in
     let add_ctors ind =
-      if not (Hash_set.mem ctors_added ind) then
+      if not (IndHashtbl.mem ctors_added ind) then
         let ind_str = Pp.string_of_ppcmds (Printer.pr_inductive env ind) in
         match query (Definition ind_str) with
         | CoqMInd (_, {mind_packets; _}) ->
@@ -76,41 +100,51 @@ let [@warning "-8"] synthesize sid n extra_names =
                 (Names.GlobRef.ConstructRef ctor) in
             add_var (Constr.mkConstruct ctor) t
           done;
-          Hash_set.add ctors_added ind
+          IndHashtbl.add ctors_added ind ()
     in
-    let terms = Hashtbl.create (module ConstrHash) in
-    let mk_terms_arr () = Option_array.create ~len:n in
+    let terms = ConstrHashtbl.create 16 in
+    let mk_terms_arr () = Array.make n None in
     let rec synth ty m =
       begin match Constr.kind ty with
         | Ind (ind, _) -> add_ctors ind
         | _ -> ()
       end;
-      let tms = Hashtbl.find_or_add terms ty ~default:mk_terms_arr in
-      match Option_array.get tms m with
+      let tms = ConstrHashtbl.find_or_add terms mk_terms_arr ty in
+      match tms.(m) with
       | Some ts -> ts
       | None ->
         let ts =
           if m = 0 then
-            Hashtbl.find_multi atoms ty
+            ConstrHashtbl.find_multi atoms ty
           else
-            let open List.Monad_infix in
-            let prods = Hash_set.to_list (find_returning ty) in
+            let prods = ConstrHashtbl.to_seq_keys (find_returning ty) in
             let depths =
-              (List.range 0 (m - 1) >>= (fun i -> [i, m - 1; m - 1, i]))
-                @ [m - 1, m - 1] in
-            depths >>= fun (arg_depth, prod_depth) ->
-              prods >>= fun prod ->
-                let _, arg_ty, _ = Constr.destProd prod in
-                let arg_ts = synth arg_ty arg_depth in
-                let prod_ts = synth prod prod_depth in
-                arg_ts >>= fun arg_tm ->
-                  prod_ts >>| fun prod_tm ->
-                    Constr.mkApp (prod_tm, [|arg_tm|])
+              List.to_seq
+                (List.concat (List.init (m - 1) (fun i -> [i, m - 1; m - 1, i]))
+                  @ [m - 1, m - 1]) in
+            depths
+              |> Seq.flat_map
+                begin fun (arg_depth, prod_depth) ->
+                  prods |> Seq.flat_map
+                    begin fun prod ->
+                      let _, arg_ty, _ = Constr.destProd prod in
+                      let arg_ts = List.to_seq (synth arg_ty arg_depth) in
+                      let prod_ts = List.to_seq (synth prod prod_depth) in
+                      arg_ts |> Seq.flat_map
+                        begin fun arg_tm ->
+                          prod_ts |> Seq.map
+                            begin fun prod_tm ->
+                              Constr.mkApp (prod_tm, [|arg_tm|])
+                            end
+                        end
+                    end
+                end
+              |> List.of_seq
         in
-        Option_array.set_some tms m ts;
+        tms.(m) <- Some ts;
         ts
     in
-    List.concat (List.init n ~f:(synth goal_type))
+    List.concat (List.init n (synth goal_type))
 
 let load file =
   Serlib_init.init
@@ -131,17 +165,20 @@ let load file =
     ; require_libs = None
     };
   let sids =
-    List.filter_map
-      (Serapi_protocol.exec_cmd (ReadFile file))
-      ~f:begin function
-        | Serapi_protocol.Added (sid, _, _) -> Some sid
-        | Serapi_protocol.CoqExn _ as ak ->
-          failwith (Sexp.to_string_hum (Sertop_ser.sexp_of_answer_kind ak))
-        | _ -> None
-      end
+    Serapi_protocol.exec_cmd (ReadFile file)
+      |> List.to_seq
+      |> Seq.filter_map
+        begin function
+          | Serapi_protocol.Added (sid, _, _) -> Some sid
+          | Serapi_protocol.CoqExn _ as ak ->
+            failwith
+              (Sexplib.Sexp.to_string_hum (Sertop_ser.sexp_of_answer_kind ak))
+          | _ -> None
+        end
+      |> List.of_seq
   in
-  List.iter sids ~f:(fun sid -> ignore (Serapi_protocol.exec_cmd (Exec sid)));
-  List.last_exn sids
+  sids |> List.iter (fun sid -> ignore (Serapi_protocol.exec_cmd (Exec sid)));
+  last sids
 
 let [@warning "-8"] print fmt sid term =
   let pp : Serapi_protocol.format_opt =
