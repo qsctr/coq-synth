@@ -71,7 +71,7 @@ let [@warning "-8"] synthesize sid n extra_names =
     let rec add_returning t =
       match Constr.kind t with
       | Prod (_, _, r) ->
-        ConstrHashtbl.add (find_returning r) t ();
+        ConstrHashtbl.replace (find_returning r) t ();
         add_returning r
       | _ -> ()
     in
