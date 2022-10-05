@@ -29,9 +29,26 @@ let exec cmd =
     pp_err (sexp_of_list Sertop_ser.sexp_of_answer_kind aks);
   aks
 
-let print_sexp sexp =
+let exec_get cmd =
+  match exec cmd with
+  | ObjList [obj] :: _ -> obj
+  | res ->
+    let open Error in
+    raise @@ of_list
+      [ create "Command" cmd Sertop_ser.sexp_of_cmd
+      ; create "returned" res
+          (sexp_of_list Sertop_ser.sexp_of_answer_kind) ]
+
+let parse expr_str =
+  let vernac_str = Printf.sprintf "Check %s." expr_str in
+  match exec_get (Parse ({ontop = None}, vernac_str)) with
+  | CoqAst {v = {expr = VernacCheckMayEval (_, _, constrexpr); _}; _} ->
+    constrexpr
+  | _ -> assert false
+
+(* let print_sexp sexp =
   Sexp.pp_hum Caml.Format.std_formatter sexp;
-  Caml.Format.print_newline ()
+  Caml.Format.print_newline () *)
 
 let load ~logical_dir ~physical_dir ~module_name =
   Serlib_init.init
@@ -46,8 +63,7 @@ let load ~logical_dir ~physical_dir ~module_name =
   let ldir = Libnames.dirpath_of_string @@
     if String.(logical_dir = "<>") then "" else logical_dir in
   ignore @@ exec @@ NewDoc
-    { top_name = TopLogical
-        (Names.DirPath.make [Names.Id.of_string "Coq_synth"])
+    { top_name = TopLogical (Libnames.dirpath_of_string "Coq_synth")
     ; iload_path = Some
         (Serapi_paths.coq_loadpath_default ~implicit:true
           ~coq_path:Coq_config.coqlib
@@ -83,22 +99,23 @@ let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
         ; pp_margin = 72
         }
     ; route = Feedback.default_route } in
-  let query q =
-    match exec (Query (query_opt, q)) with
-    | ObjList [obj] :: _ -> obj
-    | res ->
-      let open Error in
-      raise @@ of_list
-        [ create "Query" q Sertop_ser.sexp_of_query_cmd
-        ; create "returned" res
-            (sexp_of_list Sertop_ser.sexp_of_answer_kind) ] in
-  match query Env with
+  match exec_get (Query (query_opt, Env)) with
   | CoqEnv env ->
     let globref_of_string s = Nametab.locate (Libnames.qualid_of_string s) in
     let constr_of_globref g = Constr.mkRef (g, Univ.Instance.empty) in
     let type_of_globref g = fst (Typeops.type_of_global_in_context env g) in
     let hole_ty = constr_of_globref (globref_of_string hole_type) in
-    let param_names, param_types = List.unzip params in
+    let pars = List.map params ~f:begin fun (param_name, param_type) ->
+      Names.Id.of_string param_name,
+      constr_of_globref (globref_of_string param_type)
+    end in
+    let constr_of_string s = EConstr.to_constr Evd.empty
+      (fst (Constrintern.interp_constr env Evd.empty (parse s))) in
+    let exs = List.map examples ~f:begin fun (inputs, output) ->
+      List.map2_exn pars inputs
+        ~f:(fun (name, _) inp -> name, constr_of_string inp),
+      constr_of_string output
+    end in
     let atoms = Hashtbl.create (module ConstrHash) in
     let returning = Hashtbl.create (module ConstrHash) in
     let find_returning = Hashtbl.find_or_add returning
@@ -112,9 +129,8 @@ let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
     let add_var atom t =
       add_returning t;
       Hashtbl.add_multi atoms ~key:t ~data:atom in
-    List.iteri param_types ~f:begin fun i param_t ->
-      add_var (Constr.mkRel (i + 1))
-        (constr_of_globref (globref_of_string param_t))
+    List.iter pars ~f:begin fun (par_name, par_type) ->
+      add_var (Constr.mkVar par_name) par_type
     end;
     List.iter extra_vars ~f:begin fun var ->
       let globref = globref_of_string var in
@@ -127,7 +143,7 @@ let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
         for ctor_ix = 1 to Array.length packets.(snd ind).mind_consnames do
           let ctor = Names.ith_constructor_of_inductive ind ctor_ix in
           add_var (Constr.mkConstruct ctor)
-            (type_of_globref (Names.GlobRef.ConstructRef ctor))
+            (type_of_globref (ConstructRef ctor))
         done;
         Hash_set.add ctors_added ind in
     let terms = Hashtbl.create (module ConstrHash) in
@@ -160,12 +176,18 @@ let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
                     Constr.mkApp (prod_tm, [|arg_tm|]) in
         Option_array.set_some tms n ts;
         ts in
-    let param_ids = List.map param_names ~f:Names.Id.of_string in
     List.init max_depth ~f:(synth hole_ty)
       |> List.concat
+      |> List.filter ~f:begin fun term ->
+        try
+          List.iter exs ~f:begin fun (subst, output) ->
+            Reduction.conv env (Vars.replace_vars subst term) output
+          end;
+          true
+        with Reduction.NotConvertible ->
+          false
+      end
       |> List.map ~f:begin fun term ->
-        Pp.string_of_ppcmds
-          (Printer.pr_constr_under_binders_env env Evd.empty
-            (param_ids, EConstr.of_constr term))
+        Pp.string_of_ppcmds (Printer.pr_constr_env env Evd.empty term)
       end
   | _ -> assert false
