@@ -1,6 +1,6 @@
 # coq-synth
 
-Coq synthesizer
+Synthesizer for Coq terms, intended for use in the [lemmafinder](https://github.com/AishwaryaSivaraman/lemmafinder) tool.
 
 Only basic data types with no type parameters are supported right now.
 
@@ -14,75 +14,46 @@ dune install
 
 ## Run
 
-Make a Coq file where the last sentence introduces a goal with the type of the term you want to synthesize, for example
-```coq
-Definition synth : nat.
-```
-Then run with the filename, maximum depth of term, and any additional functions or variables to include in the term. All constructors are already included.
 ```shell
-$ coq_synth synth.v 4 Nat.add
-0
-1
-0 + 0
-2
-0 + 1
-1 + 0
-S (0 + 0)
-3
-S (0 + 1)
-1 + 1
-0 + (0 + 0)
-0 + 2
-0 + (0 + 1)
-1 + (0 + 0)
-1 + 2
-1 + (0 + 1)
+$ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_example" --module=list_rev --type=lst --max-depth=4 --params=l1:lst,n:nat --extra-vars=append,rev --examples='Nil,4=Cons 4 Nil;Cons 1 (Cons 0 Nil),2=Cons 2 (Cons 0 (Cons 1 Nil));Cons 1 (Cons 2 Nil),1=Cons 1 (Cons 2 (Cons 1 Nil))'
+(Cons n (rev l1))
+(append Nil (Cons n (rev l1)))
+(Cons n (append Nil (rev l1)))
+(append (rev Nil) (Cons n (rev l1)))
 ```
 
-```coq
-Inductive lst : Type :=
-  | Nil : lst
-  | Cons : nat -> lst -> lst.
-
-Fixpoint app (l1 : lst) (l2 : lst) : lst :=
-  match l1 with
-  | Nil => l2
-  | Cons n l1' => Cons n (app l1' l2)
-  end.
-
-Fixpoint rev (l : lst) : lst :=
-  match l with
-  | Nil => Nil
-  | Cons n l1' => app (rev l1') (Cons n Nil)
-  end.
-
-Parameter l1 : lst.
-Parameter n : nat.
-
-Definition synth : lst.
 ```
-```shell
-$ coq_synth synth.v 3 app rev l1 n
-Nil
-l1
-rev Nil
-rev l1
-Cons 0 Nil
-Cons n Nil
-app Nil Nil
-app l1 Nil
-Cons 0 l1
-Cons n l1
-app Nil l1
-app l1 l1
-rev (rev Nil)
-rev (rev l1)
-Cons 0 (rev Nil)
-Cons n (rev Nil)
-app Nil (rev Nil)
-app l1 (rev Nil)
-Cons 0 (rev l1)
-Cons n (rev l1)
-app Nil (rev l1)
-app l1 (rev l1)
+OPTIONS
+       --debug
+           Enable debug output to stderr
+
+       --examples=INPUT1A,INPUT1B,...=OUTPUT1;INPUT2A,INPUT2B,...=OUTPUT2;...
+           Input-output examples that the synthesized terms must satisfy
+
+       --extra-vars=VAR1,VAR2,...
+           Extra variables (already defined) to include in the synthesized
+           terms
+
+       --help[=FMT] (default=auto)
+           Show this help in format FMT. The value FMT must be one of `auto',
+           `pager', `groff' or `plain'. With `auto', the format is `pager` or
+           `plain' whenever the TERM env var is `dumb' or undefined.
+
+       --logical-dir=DIRPATH (required)
+           The logical directory of the Coq module
+
+       --max-depth=N (required)
+           The maximum depth of terms to synthesize
+
+       --module=MOD (required)
+           The name of the Coq module
+
+       --params=PARAM1:TYPE1,PARAM2:TYPE2,...
+           The parameters to the synthesized terms
+
+       --physical-dir=DIR (required)
+           The physical directory of the Coq module
+
+       --type=TYPE (required)
+           The type of the terms to synthesize
 ```
