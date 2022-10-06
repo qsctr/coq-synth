@@ -1,6 +1,4 @@
 open Cmdliner
-open Serlib
-open Sexplib
 
 let synth logical_dir physical_dir module_name hole_type max_depth params
 extra_vars examples debug =
