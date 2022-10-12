@@ -87,6 +87,10 @@ let load ~logical_dir ~physical_dir ~module_name =
   List.iter sids ~f:(fun sid -> ignore (exec (Exec sid)));
   List.last_exn sids
 
+type terms =
+  { levels : Constr.t list Res.Array.t
+  ; cumul : Constr.t Hash_set.t }
+
 let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
   let query_opt : Serapi_protocol.query_opt =
     { preds = []
@@ -109,13 +113,24 @@ let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
       Names.Id.of_string param_name,
       constr_of_globref (globref_of_string param_type)
     end in
-    let constr_of_string s = EConstr.to_constr Evd.empty
+    let constr_of_string s = EConstr.Unsafe.to_constr
       (fst (Constrintern.interp_constr env Evd.empty (parse s))) in
     let exs = List.map examples ~f:begin fun (inputs, output) ->
       List.map2_exn pars inputs
         ~f:(fun (name, _) inp -> name, constr_of_string inp),
       constr_of_string output
     end in
+    let reduction, _ = Redexpr.reduction_of_red_expr env @@ Cbn
+      { rBeta = true
+      ; rMatch = true
+      ; rFix = true
+      ; rCofix = true
+      ; rZeta = true
+      ; rDelta = true
+      ; rConst = List.map pars
+          ~f:(fun (par_name, _) -> Names.EvalVarRef par_name) } in
+    let red term = EConstr.Unsafe.to_constr
+      (snd (reduction env Evd.empty (EConstr.of_constr term))) in
     let atoms = Hashtbl.create (module ConstrHash) in
     let returning = Hashtbl.create (module ConstrHash) in
     let find_returning = Hashtbl.find_or_add returning
@@ -153,29 +168,48 @@ let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
       | _ -> ()
       end;
       let tms = Hashtbl.find_or_add terms ty
-        ~default:(fun () -> Option_array.create ~len:max_depth) in
-      match Option_array.get tms n with
-      | Some ts -> ts
-      | None ->
-        let ts =
-          if n = 0 then
-            Hashtbl.find_multi atoms ty
-          else
-            let open List.Monad_infix in
-            let prods = Hash_set.to_list (find_returning ty) in
-            let depths =
-              (List.range 0 (n - 1) >>= fun i -> [i, n - 1; n - 1, i])
-              @ [n - 1, n - 1] in
-            depths >>= fun (arg_depth, prod_depth) ->
-              prods >>= fun prod ->
-                let _, arg_ty, _ = Constr.destProd prod in
-                let arg_ts = synth arg_ty arg_depth in
-                let prod_ts = synth prod prod_depth in
-                arg_ts >>= fun arg_tm ->
-                  prod_ts >>| fun prod_tm ->
-                    Constr.mkApp (prod_tm, [|arg_tm|]) in
-        Option_array.set_some tms n ts;
-        ts in
+        ~default:begin fun () ->
+          { levels = Res.Array.empty ()
+          ; cumul = Hash_set.create (module ConstrHash) }
+        end in
+      let len = Res.Array.length tms.levels in
+      if n < len then
+        Res.Array.get tms.levels n
+      else
+        let rec syn m =
+          let level =
+            begin
+              if m = 0 then
+                Hashtbl.find_multi atoms ty
+              else begin
+                if m > len then
+                  ignore (syn (m - 1));
+                let open List.Monad_infix in
+                let prods = Hash_set.to_list (find_returning ty) in
+                let depths =
+                  (List.range 0 (m - 1) >>= fun i -> [i, m - 1; m - 1, i])
+                  @ [m - 1, m - 1] in
+                depths
+                  >>= begin fun (arg_depth, prod_depth) ->
+                    prods >>= fun prod ->
+                      let _, arg_ty, _ = Constr.destProd prod in
+                      let arg_tms = synth arg_ty arg_depth in
+                      let prod_tms = synth prod prod_depth in
+                      arg_tms >>= fun arg_tm ->
+                        prod_tms >>| fun prod_tm ->
+                          Constr.mkApp (prod_tm, [|arg_tm|])
+                  end
+                  |> List.map ~f:red
+              end
+            end
+            |> List.filter ~f:begin fun tm ->
+              match Hash_set.strict_add tms.cumul tm with
+              | Ok () -> true
+              | Error _ -> false
+            end in
+          Res.Array.add_one tms.levels level;
+          level in
+        syn n in
     List.init max_depth ~f:(synth hole_ty)
       |> List.concat
       |> List.filter ~f:begin fun term ->
