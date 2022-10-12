@@ -88,10 +88,15 @@ let load ~logical_dir ~physical_dir ~module_name =
   List.last_exn sids
 
 type terms =
-  { levels : Constr.t list Res.Array.t
+  { levels : Constr.t Sequence.t Res.Array.t
   ; cumul : Constr.t Hash_set.t }
 
-let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
+let take_option on seq =
+  match on with
+  | Some n -> Sequence.take seq n
+  | None -> seq
+
+let synthesize ~sid ~hole_type ~params ~extra_vars ~examples ~k ~levels =
   let query_opt : Serapi_protocol.query_opt =
     { preds = []
     ; limit = None
@@ -180,48 +185,57 @@ let synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars ~examples =
           let level =
             begin
               if m = 0 then
-                Hashtbl.find_multi atoms ty
+                Sequence.of_list (Hashtbl.find_multi atoms ty)
               else begin
                 if m > len then
-                  ignore (syn (m - 1));
-                let open List.Monad_infix in
-                let prods = Hash_set.to_list (find_returning ty) in
-                let depths =
-                  (List.range 0 (m - 1) >>= fun i -> [i, m - 1; m - 1, i])
-                  @ [m - 1, m - 1] in
-                depths
-                  >>= begin fun (arg_depth, prod_depth) ->
-                    prods >>= fun prod ->
-                      let _, arg_ty, _ = Constr.destProd prod in
-                      let arg_tms = synth arg_ty arg_depth in
-                      let prod_tms = synth prod prod_depth in
-                      arg_tms >>= fun arg_tm ->
-                        prod_tms >>| fun prod_tm ->
-                          Constr.mkApp (prod_tm, [|arg_tm|])
+                  (* Force previous levels to update cumul *)
+                  Sequence.iter (syn (m - 1)) ~f:ignore;
+                let open Sequence.Monad_infix in
+                let prods = Sequence.unfold_step
+                  ~init:begin
+                    Hash_set.fold (find_returning ty)
+                      ~init:Sequence.Step.Done
+                      ~f:(fun step prod -> Sequence.Step.Yield (prod, step))
                   end
-                  |> List.map ~f:red
+                  ~f:Fn.id in
+                Sequence.append
+                  (Sequence.range 0 (m - 1)
+                    >>= fun i -> Sequence.of_list [i, m - 1; m - 1, i])
+                  (Sequence.of_list [m - 1, m - 1])
+                >>= begin fun (arg_lvl, prod_lvl) ->
+                  prods >>= fun prod ->
+                    let _, arg_ty, _ = Constr.destProd prod in
+                    let arg_tms = synth arg_ty arg_lvl in
+                    let prod_tms = synth prod prod_lvl in
+                    arg_tms >>= fun arg_tm ->
+                      prod_tms >>| fun prod_tm ->
+                        red (Constr.mkApp (prod_tm, [|arg_tm|]))
+                end
               end
             end
-            |> List.filter ~f:begin fun tm ->
-              match Hash_set.strict_add tms.cumul tm with
-              | Ok () -> true
-              | Error _ -> false
-            end in
+            |> Sequence.filter ~f:begin fun tm ->
+              Result.is_ok (Hash_set.strict_add tms.cumul tm)
+            end
+            |> Sequence.memoize
+            in
           Res.Array.add_one tms.levels level;
           level in
         syn n in
-    List.init max_depth ~f:(synth hole_ty)
-      |> List.concat
-      |> List.filter ~f:begin fun term ->
-        try
-          List.iter exs ~f:begin fun (subst, output) ->
-            Reduction.conv env (Vars.replace_vars subst term) output
-          end;
-          true
-        with Reduction.NotConvertible ->
-          false
-      end
-      |> List.map ~f:begin fun term ->
-        Pp.string_of_ppcmds (Printer.pr_constr_env env Evd.empty term)
-      end
+    let open Sequence.Monad_infix in
+    Sequence.unfold_step ~init:0 ~f:(fun i -> Sequence.Step.Yield (i, i + 1))
+    |> take_option levels
+    >>= synth hole_ty
+    |> Sequence.filter ~f:begin fun term ->
+      try
+        List.iter exs ~f:begin fun (subst, output) ->
+          Reduction.conv env (Vars.replace_vars subst term) output
+        end;
+        true
+      with Reduction.NotConvertible ->
+        false
+    end
+    |> take_option k
+    >>| begin fun term ->
+      Pp.string_of_ppcmds (Printer.pr_constr_env env Evd.empty term)
+    end
   | _ -> assert false

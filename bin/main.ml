@@ -1,12 +1,22 @@
 open Cmdliner
 
-let synth logical_dir physical_dir module_name hole_type max_depth params
-extra_vars examples debug =
+let synth logical_dir physical_dir module_name hole_type params extra_vars
+examples k levels debug =
   Coq_synth.debug := debug;
   let sid = Coq_synth.load ~logical_dir ~physical_dir ~module_name in
-  List.iter print_endline @@
-    Coq_synth.synthesize ~sid ~hole_type ~max_depth ~params ~extra_vars
-      ~examples
+  Base.Sequence.iter
+    (Coq_synth.synthesize ~sid ~hole_type ~params ~extra_vars ~examples
+      ~k ~levels)
+    ~f:print_endline
+
+let nonneg =
+  let open Arg in
+  let parser = parser_of_kind_of_string ~kind:"a nonnegative integer" @@
+    fun str ->
+      match int_of_string_opt str with
+      | Some n when n >= 0 -> Some n
+      | _ -> None in
+  conv (parser, Format.pp_print_int)
 
 let () =
   let logical_dir =
@@ -27,16 +37,6 @@ let () =
     let open Arg in
     required & opt (some string) None
       & info ~doc:"The type of the terms to synthesize" ~docv:"TYPE" ["type"] in
-  let max_depth =
-    let open Arg in
-    let parser = parser_of_kind_of_string ~kind:"a nonnegative integer" @@
-      fun str ->
-        match int_of_string_opt str with
-        | Some n when n >= 0 -> Some n
-        | _ -> None in
-    required & opt (some (conv (parser, Format.pp_print_int))) None
-      & info ~doc:"The maximum depth of terms to synthesize" ~docv:"N"
-        ["max-depth"] in
   let params =
     let open Arg in
     value & opt (list (pair ~sep:':' string string)) []
@@ -56,10 +56,20 @@ let () =
         ~doc:"Input-output examples that the synthesized terms must satisfy"
         ~docv:"INPUT1A,INPUT1B,...=OUTPUT1;INPUT2A,INPUT2B,...=OUTPUT2;..."
         ["examples"] in
+  let k =
+    let open Arg in
+    value & opt (some ~none:"infinity" nonneg) None
+      & info ~doc:"The maximum number of terms to return" ~docv:"K"
+        ["num-terms"] in
+  let levels =
+    let open Arg in
+    value & opt (some ~none:"infinity" nonneg) None
+      & info ~doc:"The maximum number of levels to enumerate" ~docv:"N"
+        ["levels"] in
   let debug =
     Arg.(value & flag & info ~doc:"Enable debug output to stderr" ["debug"]) in
   let open Term in
   exit @@ eval
     ( const synth $ logical_dir $ physical_dir $ module_name $ hole_type
-        $ max_depth $ params $ extra_vars $ examples $ debug
+        $ params $ extra_vars $ examples $ k $ levels $ debug
     , info ~doc:"Coq synthesizer" "coq_synth" )
