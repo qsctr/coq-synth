@@ -64,8 +64,10 @@ let () =
   let levels =
     let open Arg in
     value & opt (some ~none:"infinity" nonneg) None
-      & info ~doc:"The maximum number of levels to enumerate" ~docv:"N"
-        ["levels"] in
+      & info
+          ~doc:"The maximum search depth (note: this does not necessarily \
+            correspond to the depth of terms due to simplification)"
+          ~docv:"N" ["max-depth"] in
   let debug =
     Arg.(value & flag & info ~doc:"Enable debug output to stderr" ["debug"]) in
   let open Term in
