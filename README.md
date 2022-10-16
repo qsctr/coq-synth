@@ -14,6 +14,8 @@ dune install
 
 ## Run
 
+The Coq module being loaded should be compiled first.
+
 Terms are printed as they are synthesized. If neither `--num-terms` nor `--max-depth` is specified then the program will run forever.
 
 ```shell
