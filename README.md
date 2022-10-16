@@ -14,12 +14,15 @@ dune install
 
 ## Run
 
+Terms are printed as they are synthesized. If neither `--num-terms` nor `--max-depth` is specified then the program will run forever.
+
 ```shell
-$ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_example" --module=list_rev --type=lst --max-depth=4 --params=l1:lst,n:nat --extra-vars=append,rev --examples='Nil,4=Cons 4 Nil;Cons 1 (Cons 0 Nil),2=Cons 2 (Cons 0 (Cons 1 Nil));Cons 1 (Cons 2 Nil),1=Cons 1 (Cons 2 (Cons 1 Nil))'
+$ coq_synth --logical-dir=lia --physical-dir="/home/bretton/Documents/github/lemmafinder/benchmark/motivating_example" --module=list_rev --type=lst --params=l1:lst,n:nat --extra-vars=append,rev --examples='Nil,4=Cons 4 Nil;Cons 1 (Cons 0 Nil),2=Cons 2 (Cons 0 (Cons 1 Nil));Cons 1 (Cons 2 Nil),1=Cons 1 (Cons 2 (Cons 1 Nil))' --num-terms=5
 (Cons n (rev l1))
-(append Nil (Cons n (rev l1)))
-(Cons n (append Nil (rev l1)))
-(append (rev Nil) (Cons n (rev l1)))
+(Cons n (append (rev l1) Nil))
+(rev (append (rev (rev l1)) (Cons n Nil)))
+(rev (append l1 (Cons n Nil)))
+(Cons n (rev (append l1 Nil)))
 ```
 
 ```
@@ -42,11 +45,15 @@ OPTIONS
        --logical-dir=DIRPATH (required)
            The logical directory of the Coq module
 
-       --max-depth=N (required)
-           The maximum depth of terms to synthesize
+       --max-depth=N (absent=infinity)
+           The maximum search depth (note: this does not necessarily
+           correspond to the depth of terms due to simplification)
 
        --module=MOD (required)
            The name of the Coq module
+
+       --num-terms=K (absent=infinity)
+           The maximum number of terms to return
 
        --params=PARAM1:TYPE1,PARAM2:TYPE2,...
            The parameters to the synthesized terms
