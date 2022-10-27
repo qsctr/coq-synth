@@ -2,8 +2,6 @@
 
 Synthesizer for Coq terms, intended for use in the [lemmafinder](https://github.com/AishwaryaSivaraman/lemmafinder) tool.
 
-Only basic data types with no type parameters are supported right now.
-
 ## Install
 
 ```shell
@@ -19,7 +17,7 @@ The Coq module being loaded should be compiled first.
 Terms are printed as they are synthesized. If neither `--num-terms` nor `--max-depth` is specified then the program will run forever.
 
 ```shell
-$ coq_synth --logical-dir=lia --physical-dir="/home/bretton/Documents/github/lemmafinder/benchmark/motivating_example" --module=list_rev --type=lst --params=l1:lst,n:nat --extra-vars=append,rev --examples='Nil,4=Cons 4 Nil;Cons 1 (Cons 0 Nil),2=Cons 2 (Cons 0 (Cons 1 Nil));Cons 1 (Cons 2 Nil),1=Cons 1 (Cons 2 (Cons 1 Nil))' --num-terms=5
+$ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_example" --module=list_rev --type=lst --params=l1:lst,n:nat --extra-exprs=append,rev --examples='Nil,4=Cons 4 Nil;Cons 1 (Cons 0 Nil),2=Cons 2 (Cons 0 (Cons 1 Nil));Cons 1 (Cons 2 Nil),1=Cons 1 (Cons 2 (Cons 1 Nil))' --num-terms=5
 (Cons n (rev l1))
 (Cons n (append (rev l1) Nil))
 (rev (append (rev (rev l1)) (Cons n Nil)))
@@ -35,9 +33,9 @@ OPTIONS
        --examples=INPUT1A,INPUT1B,...=OUTPUT1;INPUT2A,INPUT2B,...=OUTPUT2;...
            Input-output examples that the synthesized terms must satisfy
 
-       --extra-vars=VAR1,VAR2,...
-           Extra variables (already defined) to include in the synthesized
-           terms
+       --extra-exprs=EXPR1,EXPR2,...
+           Extra expressions (containing already defined variables) to include
+           in the synthesized terms
 
        --help[=FMT] (default=auto)
            Show this help in format FMT. The value FMT must be one of `auto',
