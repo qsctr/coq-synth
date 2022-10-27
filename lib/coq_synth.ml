@@ -10,13 +10,6 @@ module ConstrHash = struct
   let sexp_of_t = Ser_constr.sexp_of_t
 end
 
-module IndHash = struct
-  type t = Names.inductive
-  let compare = Names.ind_ord
-  let hash = Names.ind_hash
-  let sexp_of_t = Ser_names.sexp_of_inductive
-end
-
 let exec cmd =
   let pp_err sexp =
     let open Caml.Format in
@@ -39,12 +32,28 @@ let exec_get cmd =
       ; create "returned" res
           (sexp_of_list Sertop_ser.sexp_of_answer_kind) ]
 
-let parse expr_str =
-  let vernac_str = Printf.sprintf "Check %s." expr_str in
+let reduce_econstr env sigma =
+  let reduction, _ = Redexpr.reduction_of_red_expr env @@ Cbn
+    { rBeta = true
+    ; rMatch = true
+    ; rFix = true
+    ; rCofix = true
+    ; rZeta = true
+    ; rDelta = true
+    ; rConst = [] } in
+  fun term -> EConstr.Unsafe.to_constr (snd (reduction env sigma term))
+
+let reduce env sigma = Fn.compose (reduce_econstr env sigma) EConstr.of_constr
+
+let parse_constr_with_interp interp env sigma str =
+  let vernac_str = Printf.sprintf "Check %s." str in
   match exec_get (Parse ({ontop = None}, vernac_str)) with
-  | CoqAst {v = {expr = VernacCheckMayEval (_, _, constrexpr); _}; _} ->
-    constrexpr
+  | CoqAst {v = {expr = VernacCheckMayEval (_, _, constr_expr); _}; _} ->
+    reduce_econstr env sigma (fst (interp env sigma ?impls:None constr_expr))
   | _ -> assert false
+
+let parse_constr = parse_constr_with_interp Constrintern.interp_constr
+let parse_type = parse_constr_with_interp Constrintern.interp_type
 
 (* let print_sexp sexp =
   Sexp.pp_hum Caml.Format.std_formatter sexp;
@@ -67,12 +76,12 @@ let load ~logical_dir ~physical_dir ~module_name =
     ; iload_path = Some
         (Serapi_paths.coq_loadpath_default ~implicit:true
           ~coq_path:Coq_config.coqlib
-        @ [ { path_spec = VoPath
-                { unix_path = physical_dir
-                ; coq_path = ldir
-                ; implicit = true
-                ; has_ml = AddNoML }
-            ; recursive = true } ])
+          @ [ { path_spec = VoPath
+                  { unix_path = physical_dir
+                  ; coq_path = ldir
+                  ; implicit = true
+                  ; has_ml = AddNoML }
+              ; recursive = true } ])
     ; require_libs = None };
   let sentences = Printf.sprintf
     "Load LFindLoad. From %s Require Import %s."
@@ -96,7 +105,7 @@ let take_option on seq =
   | Some n -> Sequence.take seq n
   | None -> seq
 
-let synthesize ~sid ~hole_type ~params ~extra_vars ~examples ~k ~levels =
+let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
   let query_opt : Serapi_protocol.query_opt =
     { preds = []
     ; limit = None
@@ -109,33 +118,24 @@ let synthesize ~sid ~hole_type ~params ~extra_vars ~examples ~k ~levels =
         }
     ; route = Feedback.default_route } in
   match exec_get (Query (query_opt, Env)) with
-  | CoqEnv env ->
-    let globref_of_string s = Nametab.locate (Libnames.qualid_of_string s) in
-    let constr_of_globref g = Constr.mkRef (g, Univ.Instance.empty) in
-    let type_of_globref g = fst (Typeops.type_of_global_in_context env g) in
-    let hole_ty = constr_of_globref (globref_of_string hole_type) in
-    let pars = List.map params ~f:begin fun (param_name, param_type) ->
-      Names.Id.of_string param_name,
-      constr_of_globref (globref_of_string param_type)
-    end in
-    let constr_of_string s = EConstr.Unsafe.to_constr
-      (fst (Constrintern.interp_constr env Evd.empty (parse s))) in
+  | CoqEnv orig_env ->
+    let orig_sigma = Evd.from_env orig_env in
+    let par_env, pars = List.fold_map params ~init:orig_env
+      ~f:begin fun env (param_name, param_type) ->
+        let sigma = Evd.from_env env in
+        let par_name = Names.Id.of_string param_name in
+        let par_type = parse_type env sigma param_type in
+        Environ.push_named (LocalAssum (Context.annotR par_name, par_type)) env,
+        (par_name, par_type)
+      end in
+    let par_sigma = Evd.from_env par_env in
+    let hole_ty = parse_type par_env par_sigma hole_type in
     let exs = List.map examples ~f:begin fun (inputs, output) ->
       List.map2_exn pars inputs
-        ~f:(fun (name, _) inp -> name, constr_of_string inp),
-      constr_of_string output
+        ~f:(fun (name, _) inp -> name, parse_constr orig_env orig_sigma inp),
+      parse_constr orig_env orig_sigma output
     end in
-    let reduction, _ = Redexpr.reduction_of_red_expr env @@ Cbn
-      { rBeta = true
-      ; rMatch = true
-      ; rFix = true
-      ; rCofix = true
-      ; rZeta = true
-      ; rDelta = true
-      ; rConst = List.map pars
-          ~f:(fun (par_name, _) -> Names.EvalVarRef par_name) } in
-    let red term = EConstr.Unsafe.to_constr
-      (snd (reduction env Evd.empty (EConstr.of_constr term))) in
+    let red = reduce par_env par_sigma in
     let atoms = Hashtbl.create (module ConstrHash) in
     let returning = Hashtbl.create (module ConstrHash) in
     let find_returning = Hashtbl.find_or_add returning
@@ -152,28 +152,29 @@ let synthesize ~sid ~hole_type ~params ~extra_vars ~examples ~k ~levels =
     List.iter pars ~f:begin fun (par_name, par_type) ->
       add_var (Constr.mkVar par_name) par_type
     end;
-    List.iter extra_vars ~f:begin fun var ->
-      let globref = globref_of_string var in
-      add_var (constr_of_globref globref) (type_of_globref globref)
+    List.iter extra_exprs ~f:begin fun expr ->
+      let j = Arguments_renaming.rename_typing par_env
+        (parse_constr par_env par_sigma expr) in
+      add_var j.uj_val j.uj_type
     end;
-    let ctors_added = Hash_set.create (module IndHash) in
-    let add_ctors ind =
-      if not (Hash_set.mem ctors_added ind) then
-        let packets = (Environ.lookup_mind (fst ind) env).mind_packets in
-        for ctor_ix = 1 to Array.length packets.(snd ind).mind_consnames do
-          let ctor = Names.ith_constructor_of_inductive ind ctor_ix in
-          add_var (Constr.mkConstruct ctor)
-            (type_of_globref (ConstructRef ctor))
-        done;
-        Hash_set.add ctors_added ind in
+    let add_ctors ind targs =
+      let packets = (Environ.lookup_mind (fst ind) par_env).mind_packets in
+      for ctor_ix = 1 to Array.length packets.(snd ind).mind_consnames do
+        let ctor = Constr.mkConstruct
+          (Names.ith_constructor_of_inductive ind ctor_ix) in
+        let j = Arguments_renaming.rename_typing par_env
+          (red (Constr.mkApp (ctor, targs))) in
+        add_var j.uj_val j.uj_type
+      done in
     let terms = Hashtbl.create (module ConstrHash) in
     let rec synth ty n =
-      begin match Constr.kind ty with
-      | Ind (ind, _) -> add_ctors ind
-      | _ -> ()
-      end;
       let tms = Hashtbl.find_or_add terms ty
         ~default:begin fun () ->
+          let tcon, targs = Constr.decompose_appvect ty in
+          begin match Constr.kind tcon with
+          | Ind (ind, _) -> add_ctors ind targs
+          | _ -> ()
+          end;
           { levels = Res.Array.empty ()
           ; cumul = Hash_set.create (module ConstrHash) }
         end in
@@ -228,7 +229,7 @@ let synthesize ~sid ~hole_type ~params ~extra_vars ~examples ~k ~levels =
     |> Sequence.filter ~f:begin fun term ->
       try
         List.iter exs ~f:begin fun (subst, output) ->
-          Reduction.conv env (Vars.replace_vars subst term) output
+          Reduction.conv orig_env (Vars.replace_vars subst term) output
         end;
         true
       with Reduction.NotConvertible ->
@@ -236,6 +237,6 @@ let synthesize ~sid ~hole_type ~params ~extra_vars ~examples ~k ~levels =
     end
     |> take_option k
     >>| begin fun term ->
-      Pp.string_of_ppcmds (Printer.pr_constr_env env Evd.empty term)
+      Pp.string_of_ppcmds (Printer.pr_constr_env par_env par_sigma term)
     end
   | _ -> assert false

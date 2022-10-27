@@ -1,11 +1,11 @@
 open Cmdliner
 
-let synth logical_dir physical_dir module_name hole_type params extra_vars
+let synth logical_dir physical_dir module_name hole_type params extra_exprs
 examples k levels debug =
   Coq_synth.debug := debug;
   let sid = Coq_synth.load ~logical_dir ~physical_dir ~module_name in
   Base.Sequence.iter
-    (Coq_synth.synthesize ~sid ~hole_type ~params ~extra_vars ~examples
+    (Coq_synth.synthesize ~sid ~hole_type ~params ~extra_exprs ~examples
       ~k ~levels)
     ~f:print_endline
 
@@ -42,13 +42,13 @@ let () =
     value & opt (list (pair ~sep:':' string string)) []
       & info ~doc:"The parameters to the synthesized terms"
         ~docv:"PARAM1:TYPE1,PARAM2:TYPE2,..." ["params"] in
-  let extra_vars =
+  let extra_exprs =
     let open Arg in
     value & opt (list string) []
       & info
-        ~doc:"Extra variables (already defined) to include in the \
-          synthesized terms"
-        ~docv:"VAR1,VAR2,..." ["extra-vars"] in
+        ~doc:"Extra expressions (containing already defined variables) to \
+          include in the synthesized terms"
+        ~docv:"EXPR1,EXPR2,..." ["extra-exprs"] in
   let examples =
     let open Arg in
     value & opt (list ~sep:';' (pair ~sep:'=' (list string) string)) []
@@ -73,5 +73,5 @@ let () =
   let open Term in
   exit @@ eval
     ( const synth $ logical_dir $ physical_dir $ module_name $ hole_type
-        $ params $ extra_vars $ examples $ k $ levels $ debug
+        $ params $ extra_exprs $ examples $ k $ levels $ debug
     , info ~doc:"Coq synthesizer" "coq_synth" )
