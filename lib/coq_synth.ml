@@ -49,7 +49,9 @@ let parse_constr_with_interp interp env sigma str =
   let vernac_str = Printf.sprintf "Check %s." str in
   match exec_get (Parse ({ontop = None}, vernac_str)) with
   | CoqAst {v = {expr = VernacCheckMayEval (_, _, constr_expr); _}; _} ->
-    reduce_econstr env sigma (fst (interp env sigma ?impls:None constr_expr))
+    let constr, ustate = interp env sigma ?impls:None constr_expr in
+    let env' = Environ.push_context_set (UState.context_set ustate) env in
+    reduce_econstr env' sigma constr, env'
   | _ -> assert false
 
 let parse_constr = parse_constr_with_interp Constrintern.interp_constr
@@ -124,18 +126,20 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
       ~f:begin fun env (param_name, param_type) ->
         let sigma = Evd.from_env env in
         let par_name = Names.Id.of_string param_name in
-        let par_type = parse_type env sigma param_type in
-        Environ.push_named (LocalAssum (Context.annotR par_name, par_type)) env,
+        let par_type, env' = parse_type env sigma param_type in
+        Environ.push_named
+          (LocalAssum (Context.annotR par_name, par_type)) env',
         (par_name, par_type)
       end in
     let par_sigma = Evd.from_env par_env in
-    let hole_ty = parse_type par_env par_sigma hole_type in
+    let hole_ty, par_env' = parse_type par_env par_sigma hole_type in
     let exs = List.map examples ~f:begin fun (inputs, output) ->
-      List.map2_exn pars inputs
-        ~f:(fun (name, _) inp -> name, parse_constr orig_env orig_sigma inp),
-      parse_constr orig_env orig_sigma output
+      List.map2_exn pars inputs ~f:begin fun (name, _) inp ->
+        name, fst (parse_constr orig_env orig_sigma inp)
+      end,
+      fst (parse_constr orig_env orig_sigma output)
     end in
-    let red = reduce par_env par_sigma in
+    let red = reduce par_env' par_sigma in
     let atoms = Hashtbl.create (module ConstrHash) in
     let returning = Hashtbl.create (module ConstrHash) in
     let find_returning = Hashtbl.find_or_add returning
@@ -152,17 +156,20 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
     List.iter pars ~f:begin fun (par_name, par_type) ->
       add_var (Constr.mkVar par_name) par_type
     end;
-    List.iter extra_exprs ~f:begin fun expr ->
-      let j = Arguments_renaming.rename_typing par_env
-        (parse_constr par_env par_sigma expr) in
-      add_var j.uj_val j.uj_type
-    end;
+    let par_env'' = List.fold extra_exprs ~init:par_env'
+      ~f:begin fun env expr ->
+        let constr, env' = parse_constr env par_sigma expr in
+        let j = Arguments_renaming.rename_typing env' constr in
+        add_var j.uj_val j.uj_type;
+        env'
+    end in
     let add_ctors ind targs =
-      let packets = (Environ.lookup_mind (fst ind) par_env).mind_packets in
-      for ctor_ix = 1 to Array.length packets.(snd ind).mind_consnames do
+      let body =
+        (Environ.lookup_mind (fst ind) par_env'').mind_packets.(snd ind) in
+      for ctor_ix = 1 to Array.length body.mind_consnames do
         let ctor = Constr.mkConstruct
           (Names.ith_constructor_of_inductive ind ctor_ix) in
-        let j = Arguments_renaming.rename_typing par_env
+        let j = Arguments_renaming.rename_typing par_env''
           (red (Constr.mkApp (ctor, targs))) in
         add_var j.uj_val j.uj_type
       done in
@@ -237,6 +244,6 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
     end
     |> take_option k
     >>| begin fun term ->
-      Pp.string_of_ppcmds (Printer.pr_constr_env par_env par_sigma term)
+      Pp.string_of_ppcmds (Printer.pr_constr_env par_env'' par_sigma term)
     end
   | _ -> assert false
