@@ -28,7 +28,7 @@ $ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_e
 Polymorphism is supported:
 
 ```shell
-$ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_example_poly" --module=list_rev --params='t:Set,l1:list t,n:t' --type='list t' --extra-exprs='@app t,@rev t' --examples='nat,@nil nat,4=@cons nat 4 (@nil nat);nat,@cons nat 1 (@cons nat 0 (@nil nat)),2=@cons nat 2 (@cons nat 0 (@cons nat 1 (@nil nat)));nat,@cons nat 1 (@cons nat 2 (@nil nat)),1=@cons nat 1 (@cons nat 2 (@cons nat 1 (@nil nat)))' --num-terms=5 
+$ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_example_poly" --module=list_rev --params='t:Type,l1:list t,n:t' --type='list t' --extra-exprs='@app t,@rev t' --examples='nat,@nil nat,4=@cons nat 4 (@nil nat);nat,@cons nat 1 (@cons nat 0 (@nil nat)),2=@cons nat 2 (@cons nat 0 (@cons nat 1 (@nil nat)));nat,@cons nat 1 (@cons nat 2 (@nil nat)),1=@cons nat 1 (@cons nat 2 (@cons nat 1 (@nil nat)))' --num-terms=5 
 (n :: rev l1)%list
 (n :: rev l1 ++ nil)%list
 (rev (rev (rev l1) ++ n :: nil))
