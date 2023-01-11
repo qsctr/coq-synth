@@ -96,6 +96,8 @@ let load ~logical_dir ~physical_dir ~module_name =
       | _ -> None
     end in
   List.iter sids ~f:(fun sid -> ignore (exec (Exec sid)));
+  Constrextern.print_implicits := true;
+  Constrextern.print_no_symbol := true;
   List.last_exn sids
 
 type terms =
