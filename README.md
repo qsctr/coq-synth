@@ -28,12 +28,12 @@ $ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_e
 Polymorphism is supported:
 
 ```shell
-$ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_example_poly" --module=list_rev --params='t:Type,l1:list t,n:t' --type='list t' --extra-exprs='@app t,@rev t' --examples='nat,@nil nat,4=@cons nat 4 (@nil nat);nat,@cons nat 1 (@cons nat 0 (@nil nat)),2=@cons nat 2 (@cons nat 0 (@cons nat 1 (@nil nat)));nat,@cons nat 1 (@cons nat 2 (@nil nat)),1=@cons nat 1 (@cons nat 2 (@cons nat 1 (@nil nat)))' --num-terms=5 
-(n :: rev l1)%list
-(n :: rev l1 ++ nil)%list
-(rev (rev (rev l1) ++ n :: nil))
-(rev (l1 ++ n :: nil))
-(n :: rev (l1 ++ nil))%list
+$ coq_synth --logical-dir=lia --physical-dir="lemmafinder/benchmark/motivating_example_poly" --module=list_rev --params='t:Type,l1:list t,n:t' --type='list t' --extra-exprs='@app t,@List.rev t' --examples='nat,@nil nat,4=@cons nat 4 (@nil nat);nat,@cons nat 1 (@cons nat 0 (@nil nat)),2=@cons nat 2 (@cons nat 0 (@cons nat 1 (@nil nat)));nat,@cons nat 1 (@cons nat 2 (@nil nat)),1=@cons nat 1 (@cons nat 2 (@cons nat 1 (@nil nat)))' --num-terms=5 
+(@cons t n (@List.rev t l1))
+(@cons t n (@app t (@List.rev t l1) (@nil t)))
+(@List.rev t (@app t (@List.rev t (@List.rev t l1)) (@cons t n (@nil t))))
+(@List.rev t (@app t l1 (@cons t n (@nil t))))
+(@cons t n (@List.rev t (@app t l1 (@nil t))))
 ```
 
 ```
