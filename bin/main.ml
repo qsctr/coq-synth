@@ -3,11 +3,12 @@ open Cmdliner
 let synth logical_dir physical_dir module_name hole_type params extra_exprs
 examples k levels debug =
   Coq_synth.debug := debug;
-  let sid = Coq_synth.load ~logical_dir ~physical_dir ~module_name in
-  Base.Sequence.iter
-    (Coq_synth.synthesize ~sid ~hole_type ~params ~extra_exprs ~examples
-      ~k ~levels)
-    ~f:print_endline
+  Coq_synth.with_error_handler prerr_endline @@ fun () ->
+    let sid = Coq_synth.load ~logical_dir ~physical_dir ~module_name in
+    Base.Sequence.iter
+      (Coq_synth.synthesize ~sid ~hole_type ~params ~extra_exprs ~examples
+        ~k ~levels)
+      ~f:print_endline
 
 let nonneg =
   let open Arg in

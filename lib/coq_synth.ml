@@ -61,6 +61,15 @@ let parse_type = parse_constr_with_interp Constrintern.interp_type
   Sexp.pp_hum Caml.Format.std_formatter sexp;
   Caml.Format.print_newline () *)
 
+let with_error_handler h f =
+  try f ()
+  with e ->
+    let bt = Caml.Printexc.get_raw_backtrace () in
+    if CErrors.is_anomaly e then
+      Caml.Printexc.raise_with_backtrace e bt
+    else
+      h (Pp.string_of_ppcmds (CErrors.print e))
+
 let load ~logical_dir ~physical_dir ~module_name =
   Serlib_init.init
     ~options:

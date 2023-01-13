@@ -2,6 +2,8 @@ open Base
 
 val debug : bool ref
 
+val with_error_handler : (string -> 'a) -> (unit -> 'a) -> 'a
+
 val load : logical_dir:string -> physical_dir:string -> module_name:string
   -> Stateid.t
 
