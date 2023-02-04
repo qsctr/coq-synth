@@ -5,10 +5,27 @@ open Sertop
 
 let debug = ref false
 
+type tms =
+  { levels : Constr.t Sequence.t Res.Array.t
+  ; cumul : Constr.t Hash_set.t }
+
 module ConstrHash = struct
   include Constr
   let sexp_of_t = Ser_constr.sexp_of_t
 end
+
+let seq_of_hash_set hs =
+  Sequence.unfold_step
+    ~init:begin
+      Hash_set.fold hs ~init:Sequence.Step.Done
+        ~f:(fun step prod -> Sequence.Step.Yield (prod, step))
+    end
+    ~f:Fn.id
+
+let take_option on seq =
+  match on with
+  | Some n -> Sequence.take seq n
+  | None -> seq
 
 let exec cmd =
   let pp_err sexp =
@@ -109,15 +126,6 @@ let load ~logical_dir ~physical_dir ~module_name =
   Constrextern.print_no_symbol := true;
   List.last_exn sids
 
-type terms =
-  { levels : Constr.t Sequence.t Res.Array.t
-  ; cumul : Constr.t Hash_set.t }
-
-let take_option on seq =
-  match on with
-  | Some n -> Sequence.take seq n
-  | None -> seq
-
 let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
   let query_opt : Serapi_protocol.query_opt =
     { preds = []
@@ -173,7 +181,7 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
         let j = Arguments_renaming.rename_typing env' constr in
         add_var j.uj_val j.uj_type;
         env'
-    end in
+      end in
     let add_ctors ind targs =
       let body =
         (Environ.lookup_mind (fst ind) par_env'').mind_packets.(snd ind) in
@@ -185,17 +193,18 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
         add_var j.uj_val j.uj_type
       done in
     let terms = Hashtbl.create (module ConstrHash) in
+    let get_tms ty =
+      Hashtbl.find_or_add terms ty ~default:begin fun () ->
+        let tcon, targs = Constr.decompose_appvect ty in
+        begin match Constr.kind tcon with
+        | Ind (ind, _) -> add_ctors ind targs
+        | _ -> ()
+        end;
+        { levels = Res.Array.empty ()
+        ; cumul = Hash_set.create (module ConstrHash) }
+      end in
     let rec synth ty n =
-      let tms = Hashtbl.find_or_add terms ty
-        ~default:begin fun () ->
-          let tcon, targs = Constr.decompose_appvect ty in
-          begin match Constr.kind tcon with
-          | Ind (ind, _) -> add_ctors ind targs
-          | _ -> ()
-          end;
-          { levels = Res.Array.empty ()
-          ; cumul = Hash_set.create (module ConstrHash) }
-        end in
+      let tms = get_tms ty in
       let len = Res.Array.length tms.levels in
       if n < len then
         Res.Array.get tms.levels n
@@ -203,20 +212,17 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
         let rec syn m =
           let level =
             begin
-              if m = 0 then
+              if m = 0 then begin
+                (* ty may match the type of a constructor of a yet unsynthesized
+                   type *)
+                ignore (get_tms (Term.strip_prod ty));
                 Sequence.of_list (Hashtbl.find_multi atoms ty)
-              else begin
+              end else begin
                 if m > len then
                   (* Force previous levels to update cumul *)
                   Sequence.iter (syn (m - 1)) ~f:ignore;
                 let open Sequence.Monad_infix in
-                let prods = Sequence.unfold_step
-                  ~init:begin
-                    Hash_set.fold (find_returning ty)
-                      ~init:Sequence.Step.Done
-                      ~f:(fun step prod -> Sequence.Step.Yield (prod, step))
-                  end
-                  ~f:Fn.id in
+                let prods = seq_of_hash_set (find_returning ty) in
                 Sequence.append
                   (Sequence.range 0 (m - 1)
                     >>= fun i -> Sequence.of_list [i, m - 1; m - 1, i])
