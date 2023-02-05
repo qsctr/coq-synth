@@ -5,7 +5,22 @@ open Sertop
 
 let debug = ref false
 
-exception User_error of string
+type example_type_target =
+  | Parameter_target of Names.variable
+  | Hole_target
+
+type user_error =
+  | Example_arity_error of
+    { params : (Names.variable * Constr.types) list
+    ; inputs : string list }
+  | Example_type_error of
+    { env : Environ.env
+    ; judgment : Environ.unsafe_judgment
+    ; target : example_type_target
+    ; target_type : Constr.types
+    ; subst : (Names.variable * Constr.t) list }
+
+exception User_error of user_error
 
 type tms =
   { levels : Constr.t Sequence.t Res.Array.t
@@ -17,17 +32,52 @@ module ConstrHash = struct
 end
 
 let seq_of_hash_set hs =
-  Sequence.unfold_step
-    ~init:begin
-      Hash_set.fold hs ~init:Sequence.Step.Done
-        ~f:(fun step prod -> Sequence.Step.Yield (prod, step))
-    end
+  Sequence.unfold
+    ~init:(Hash_set.fold hs ~init:None ~f:(fun step prod -> Some (prod, step)))
     ~f:Fn.id
 
 let take_option on seq =
   match on with
   | Some n -> Sequence.take seq n
   | None -> seq
+
+let string_of_user_error = function
+  | Example_arity_error e ->
+    Printf.sprintf
+      "Number of parameters (%d) and number of inputs in example \"%s\" (%d) \
+        do not match"
+      (List.length e.params) (String.concat ~sep:", " e.inputs)
+      (List.length e.inputs)
+  | Example_type_error e ->
+    let sigma = Evd.from_env e.env in
+    let string_of_constr =
+      Fn.compose Pp.string_of_ppcmds (Printer.pr_lconstr_env e.env sigma) in
+    let target_type = string_of_constr e.target_type in
+    let ety = EConstr.of_constr e.target_type in
+    Printf.sprintf
+      "Type of example %s (%s : %s) does not match type of %s%s"
+      begin match e.target with
+      | Parameter_target _ -> "input"
+      | Hole_target -> "output"
+      end
+      (string_of_constr e.judgment.uj_val) (string_of_constr e.judgment.uj_type)
+      begin match e.target with
+      | Parameter_target name ->
+        Printf.sprintf "parameter (%s : %s)"
+          (Names.Id.to_string name) target_type
+      | Hole_target -> Printf.sprintf "target (%s)" target_type
+      end
+      begin
+        List.filter e.subst
+          ~f:(fun (name, _) -> Termops.local_occur_var sigma name ety)
+        |> function
+        | [] -> ""
+        | occur_subst ->
+          Printf.sprintf " with (%s)" @@ String.concat ~sep:", " @@
+            List.map occur_subst ~f:begin fun (name, inp) ->
+              Names.Id.to_string name ^ " = " ^ string_of_constr inp
+            end
+      end
 
 let exec cmd =
   let pp_err sexp =
@@ -82,7 +132,7 @@ let parse_type = parse_constr_with_interp Constrintern.interp_type
 
 let with_error_handler h f =
   try f () with
-  | User_error s -> h s
+  | User_error e -> h (string_of_user_error e)
   | e ->
     let bt = Caml.Printexc.get_raw_backtrace () in
     if CErrors.is_anomaly e then
@@ -154,27 +204,32 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
           (LocalAssum (Context.annotR par_name, par_type)) env',
         (par_name, par_type)
       end in
-    let par_sigma = Evd.from_env par_env in
-    let hole_ty, par_env' = parse_type par_env par_sigma hole_type in
+    let hole_ty, par_env' =
+      parse_type par_env (Evd.from_env par_env) hole_type in
+    let par_sigma' = Evd.from_env par_env' in
+    let parse_check_ex_constr target ty subst str =
+      let constr, env = parse_constr orig_env orig_sigma str in
+      let j = Arguments_renaming.rename_typing env constr in
+      begin
+        try Reduction.conv_leq par_env' j.uj_type (Vars.replace_vars subst ty)
+        with Reduction.NotConvertible ->
+          raise @@ User_error
+            (Example_type_error
+              {env = par_env'; judgment = j; target; target_type = ty; subst})
+      end;
+      j.uj_val in
     let exs = List.map examples ~f:begin fun (inputs, output) ->
-      begin match
-        List.map2 pars inputs ~f:begin fun (name, _) inp ->
-          name, fst (parse_constr orig_env orig_sigma inp)
-        end
-      with
-      | Ok subst -> subst
+      List.fold2 pars inputs ~init:[] ~f:begin fun subst (name, ty) inp ->
+        subst @
+          [name, parse_check_ex_constr (Parameter_target name) ty subst inp]
+      end
+      |> function
+      | Ok subst ->
+        subst, parse_check_ex_constr Hole_target hole_ty subst output
       | Unequal_lengths ->
-        raise @@ User_error begin
-          Printf.sprintf
-            "Number of parameters (%d) and number of inputs in example \"%s\" \
-              (%d) do not match"
-            (List.length pars) (String.concat ~sep:", " inputs)
-            (List.length inputs)
-        end
-      end,
-      fst (parse_constr orig_env orig_sigma output)
+        raise (User_error (Example_arity_error {params = pars; inputs}))
     end in
-    let red = reduce par_env' par_sigma in
+    let red = reduce par_env' par_sigma' in
     let atoms = Hashtbl.create (module ConstrHash) in
     let returning = Hashtbl.create (module ConstrHash) in
     let find_returning = Hashtbl.find_or_add returning
@@ -193,11 +248,12 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
     end;
     let par_env'' = List.fold extra_exprs ~init:par_env'
       ~f:begin fun env expr ->
-        let constr, env' = parse_constr env par_sigma expr in
+        let constr, env' = parse_constr env par_sigma' expr in
         let j = Arguments_renaming.rename_typing env' constr in
         add_var j.uj_val j.uj_type;
         env'
       end in
+    let par_sigma'' = Evd.from_env par_env'' in
     let add_ctors ind targs =
       let body =
         (Environ.lookup_mind (fst ind) par_env'').mind_packets.(snd ind) in
@@ -277,6 +333,6 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
     end
     |> take_option k
     >>| begin fun term ->
-      Pp.string_of_ppcmds (Printer.pr_constr_env par_env'' par_sigma term)
+      Pp.string_of_ppcmds (Printer.pr_constr_env par_env'' par_sigma'' term)
     end
   | _ -> assert false
