@@ -5,6 +5,8 @@ open Sertop
 
 let debug = ref false
 
+exception User_error of string
+
 type tms =
   { levels : Constr.t Sequence.t Res.Array.t
   ; cumul : Constr.t Hash_set.t }
@@ -79,8 +81,9 @@ let parse_type = parse_constr_with_interp Constrintern.interp_type
   Caml.Format.print_newline () *)
 
 let with_error_handler h f =
-  try f ()
-  with e ->
+  try f () with
+  | User_error s -> h s
+  | e ->
     let bt = Caml.Printexc.get_raw_backtrace () in
     if CErrors.is_anomaly e then
       Caml.Printexc.raise_with_backtrace e bt
@@ -97,26 +100,27 @@ let load ~logical_dir ~physical_dir ~module_name =
     { fb_handler = ignore
     ; ml_load = None
     ; debug = false };
-  let ldir = Libnames.dirpath_of_string @@
-    if String.(logical_dir = "<>") then "" else logical_dir in
+  let ldir = Libnames.dirpath_of_string
+    (if String.(logical_dir = "<>") then "" else logical_dir) in
   ignore @@ exec @@ NewDoc
     { top_name = TopLogical (Libnames.dirpath_of_string "Coq_synth")
-    ; iload_path = Some
-        (Serapi_paths.coq_loadpath_default ~implicit:true
+    ; iload_path = Some begin
+        Serapi_paths.coq_loadpath_default ~implicit:true
           ~coq_path:Coq_config.coqlib
           @ [ { path_spec = VoPath
                   { unix_path = physical_dir
                   ; coq_path = ldir
                   ; implicit = true
                   ; has_ml = AddNoML }
-              ; recursive = true } ])
+              ; recursive = true } ]
+      end
     ; require_libs = None };
   let sentences = Printf.sprintf
     "Load LFindLoad. From %s Require Import %s."
     (Names.DirPath.to_string ldir) module_name in
   let sids =
-    exec (Add
-      ({lim = None; ontop = None; newtip = None; verb = false}, sentences))
+    exec
+      (Add ({lim = None; ontop = None; newtip = None; verb = false}, sentences))
     |> List.filter_map ~f:begin function
       | Serapi_protocol.Added (sid, _, _) -> Some sid
       | _ -> None
@@ -153,8 +157,20 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
     let par_sigma = Evd.from_env par_env in
     let hole_ty, par_env' = parse_type par_env par_sigma hole_type in
     let exs = List.map examples ~f:begin fun (inputs, output) ->
-      List.map2_exn pars inputs ~f:begin fun (name, _) inp ->
-        name, fst (parse_constr orig_env orig_sigma inp)
+      begin match
+        List.map2 pars inputs ~f:begin fun (name, _) inp ->
+          name, fst (parse_constr orig_env orig_sigma inp)
+        end
+      with
+      | Ok subst -> subst
+      | Unequal_lengths ->
+        raise @@ User_error begin
+          Printf.sprintf
+            "Number of parameters (%d) and number of inputs in example \"%s\" \
+              (%d) do not match"
+            (List.length pars) (String.concat ~sep:", " inputs)
+            (List.length inputs)
+        end
       end,
       fst (parse_constr orig_env orig_sigma output)
     end in
@@ -247,7 +263,7 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
           level in
         syn n in
     let open Sequence.Monad_infix in
-    Sequence.unfold_step ~init:0 ~f:(fun i -> Sequence.Step.Yield (i, i + 1))
+    Sequence.unfold ~init:0 ~f:(fun i -> Some (i, i + 1))
     |> take_option levels
     >>= synth hole_ty
     |> Sequence.filter ~f:begin fun term ->

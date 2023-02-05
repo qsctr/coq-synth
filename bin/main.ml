@@ -3,13 +3,13 @@ open Cmdliner
 let synth logical_dir physical_dir module_name hole_type params extra_exprs
 examples k levels debug =
   Coq_synth.debug := debug;
-  Coq_synth.with_error_handler (fun e -> `Error (false, e)) @@ fun () ->
+  Coq_synth.with_error_handler (fun e -> Error (`Msg e)) @@ fun () ->
     let sid = Coq_synth.load ~logical_dir ~physical_dir ~module_name in
     Base.Sequence.iter
       (Coq_synth.synthesize ~sid ~hole_type ~params ~extra_exprs ~examples
         ~k ~levels)
       ~f:print_endline;
-    `Ok ()
+    Ok ()
 
 let nonneg =
   let open Arg in
@@ -73,9 +73,9 @@ let () =
   let debug =
     Arg.(value & flag & info ~doc:"Enable debug output to stderr" ["debug"]) in
   let open Term in
-  let exits = exit_info ~doc:"on Coq error." 1 :: default_exits in
+  let exits = exit_info ~doc:"on user error." 1 :: default_exits in
   exit @@ eval begin
-    ret begin
+    term_result begin
       const synth $ logical_dir $ physical_dir $ module_name $ hole_type
         $ params $ extra_exprs $ examples $ k $ levels $ debug
     end,
