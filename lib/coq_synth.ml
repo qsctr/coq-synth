@@ -22,19 +22,35 @@ type user_error =
 
 exception User_error of user_error
 
-type tms =
-  { levels : Constr.t Sequence.t Res.Array.t
+type enum_level =
+  { eguess_terms : Constr.t Sequence.t
+  ; mutable irefine_empty_terms : Constr.t Sequence.t option }
+
+type term_cache_entry =
+  { levels : enum_level Res.Array.t
   ; cumul : Constr.t Hash_set.t }
+
+type 'a ctor_struct =
+  { ctor : Constr.t
+  ; args : 'a list }
+
+type ctors =
+  { nullary : Constr.t Sequence.t
+  ; nonnullary : Constr.types ctor_struct Sequence.t }
+
+type rtree =
+  { ty : Constr.types
+  ; examples : ((Names.variable * Constr.t) list * Constr.t) list
+  ; mutable terms : Constr.t Sequence.t
+  ; branch : rtree_branch }
+and rtree_branch =
+  | EGuess
+  | IRefine_ctor of rtree ctor_struct
 
 module ConstrHash = struct
   include Constr
   let sexp_of_t = Ser_constr.sexp_of_t
 end
-
-let seq_of_hash_set hs =
-  Sequence.unfold
-    ~init:(Hash_set.fold hs ~init:None ~f:(fun step prod -> Some (prod, step)))
-    ~f:Fn.id
 
 let take_option on seq =
   match on with
@@ -65,7 +81,7 @@ let string_of_user_error = function
       | Parameter_target name ->
         Printf.sprintf "parameter (%s : %s)"
           (Names.Id.to_string name) target_type
-      | Hole_target -> Printf.sprintf "target (%s)" target_type
+      | Hole_target -> Printf.sprintf "goal (%s)" target_type
       end
       begin
         List.filter e.subst
@@ -254,83 +270,190 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
         env'
       end in
     let par_sigma'' = Evd.from_env par_env'' in
-    let add_ctors ind targs =
-      let body =
-        (Environ.lookup_mind (fst ind) par_env'').mind_packets.(snd ind) in
-      for ctor_ix = 1 to Array.length body.mind_consnames do
-        let ctor = Constr.mkConstruct
-          (Names.ith_constructor_of_inductive ind ctor_ix) in
-        let j = Arguments_renaming.rename_typing par_env''
-          (red (Constr.mkApp (ctor, targs))) in
-        add_var j.uj_val j.uj_type
-      done in
-    let terms = Hashtbl.create (module ConstrHash) in
-    let get_tms ty =
-      Hashtbl.find_or_add terms ty ~default:begin fun () ->
-        let tcon, targs = Constr.decompose_appvect ty in
-        begin match Constr.kind tcon with
-        | Ind (ind, _) -> add_ctors ind targs
-        | _ -> ()
-        end;
+    let ctors = Hashtbl.create (module ConstrHash) in
+    let infer_ctor c targs = Arguments_renaming.rename_typing par_env''
+      (red (Constr.mkApp (Constr.mkConstruct c, targs))) in
+    let rec get_arg_types ty =
+      match Constr.kind ty with
+      | Prod (_, arg_ty, ret_ty) -> arg_ty :: get_arg_types ret_ty
+      | _ -> [] in
+    let get_ctors ty = Hashtbl.find_or_add ctors ty ~default:begin fun () ->
+      let tcon, targs = Constr.decompose_appvect ty in
+      match Constr.kind tcon with
+      | Ind (ind, _) ->
+        let consnames = (Environ.lookup_mind (fst ind) par_env'')
+          .mind_packets.(snd ind).mind_consnames in
+        let nullary, nonnullary =
+          List.range ~stop:`inclusive 1 (Array.length consnames)
+          |> List.partition_map ~f:begin fun i ->
+            let j = infer_ctor
+              (Names.ith_constructor_of_inductive ind i) targs in
+            match get_arg_types j.uj_type with
+            | [] -> `Fst j.uj_val
+            | args -> `Snd {ctor = j.uj_val; args}
+          end in
+        { nullary = Sequence.of_list nullary
+        ; nonnullary = Sequence.of_list nonnullary }
+      | _ -> {nullary = Sequence.empty; nonnullary = Sequence.empty}
+    end in
+    let term_cache = Hashtbl.create (module ConstrHash) in
+    let lookup_cache ty =
+      Hashtbl.find_or_add term_cache ty ~default:begin fun () ->
         { levels = Res.Array.empty ()
         ; cumul = Hash_set.create (module ConstrHash) }
       end in
-    let rec synth ty n =
-      let tms = get_tms ty in
-      let len = Res.Array.length tms.levels in
+    let rec eguess ty n =
+      let entry = lookup_cache ty in
+      let len = Res.Array.length entry.levels in
       if n < len then
-        Res.Array.get tms.levels n
+        (Res.Array.get entry.levels n).eguess_terms
       else
-        let rec syn m =
-          let level =
+        let rec eg m =
+          let terms =
             begin
               if m = 0 then begin
                 (* ty may match the type of a constructor of a yet unsynthesized
                    type *)
-                ignore (get_tms (Term.strip_prod ty));
+                (* ignore (lookup_cache (Term.strip_prod ty)); *)
                 Sequence.of_list (Hashtbl.find_multi atoms ty)
               end else begin
                 if m > len then
                   (* Force previous levels to update cumul *)
-                  Sequence.iter (syn (m - 1)) ~f:ignore;
+                  Sequence.iter (eg (m - 1)) ~f:ignore;
                 let open Sequence.Monad_infix in
-                let prods = seq_of_hash_set (find_returning ty) in
+                let prods = Sequence.of_list
+                  (Hash_set.to_list (find_returning ty)) in
                 Sequence.append
                   (Sequence.range 0 (m - 1)
                     >>= fun i -> Sequence.of_list [i, m - 1; m - 1, i])
                   (Sequence.of_list [m - 1, m - 1])
-                >>= begin fun (arg_lvl, prod_lvl) ->
+                >>= fun (arg_lvl, prod_lvl) ->
                   prods >>= fun prod ->
                     let _, arg_ty, _ = Constr.destProd prod in
-                    let arg_tms = synth arg_ty arg_lvl in
-                    let prod_tms = synth prod prod_lvl in
+                    let arg_tms = irefine_empty arg_ty arg_lvl in
+                    let prod_tms = eguess prod prod_lvl in
                     arg_tms >>= fun arg_tm ->
                       prod_tms >>| fun prod_tm ->
                         red (Constr.mkApp (prod_tm, [|arg_tm|]))
-                end
               end
             end
             |> Sequence.filter ~f:begin fun tm ->
-              Result.is_ok (Hash_set.strict_add tms.cumul tm)
+              Result.is_ok (Hash_set.strict_add entry.cumul tm)
             end
-            |> Sequence.memoize
-            in
-          Res.Array.add_one tms.levels level;
-          level in
-        syn n in
+            |> Sequence.memoize in
+          Res.Array.add_one entry.levels
+            {eguess_terms = terms; irefine_empty_terms = None};
+          terms in
+        eg n
+    and irefine_empty ty n =
+      let entry = lookup_cache ty in
+      let build_terms () =
+        let guess_terms = eguess ty n in
+        Sequence.iter guess_terms ~f:ignore;
+        let ctors = get_ctors ty in
+        let ctor_terms =
+          begin
+            if n = 0 then
+              ctors.nullary
+            else
+              let open Sequence.Monad_infix in
+              ctors.nonnullary
+              >>= begin fun c ->
+                List.map c.args ~f:(fun arg_ty -> irefine_empty arg_ty (n - 1))
+                |> Sequence.all
+                >>| fun args -> red (Term.applist (c.ctor, args))
+              end
+          end
+          |> Sequence.filter ~f:begin fun tm ->
+            Result.is_ok (Hash_set.strict_add entry.cumul tm)
+          end in
+        let terms = Sequence.memoize (Sequence.append guess_terms ctor_terms) in
+        (Res.Array.get entry.levels n).irefine_empty_terms <- Some terms;
+        terms in
+      if n < Res.Array.length entry.levels then
+        match (Res.Array.get entry.levels n).irefine_empty_terms with
+        | Some terms -> terms
+        | None -> build_terms ()
+      else
+        build_terms () in
+    let rec build_rtree ty xs =
+      { ty
+      ; examples = xs
+      ; terms = Sequence.empty
+      ; branch =
+        let tcon, targs = Constr.decompose_appvect ty in
+        match xs with
+        | x :: xs' when Constr.isInd tcon -> begin
+            let out_fun_kind (_, o) =
+              Constr.kind (fst (Constr.decompose_app o)) in
+            let same_construct c x' =
+              match out_fun_kind x' with
+              | Construct (c', _) -> Names.eq_constructor c c'
+              | _ -> false in
+            match out_fun_kind x with
+            | Construct (c, _) when List.for_all xs' ~f:(same_construct c) ->
+              let c_j = infer_ctor c targs in
+              IRefine_ctor
+                { ctor = c_j.uj_val
+                ; args =
+                  List.mapi (get_arg_types c_j.uj_type) ~f:begin fun i arg_ty ->
+                    build_rtree arg_ty @@
+                      List.map xs ~f:begin fun (subst, o) ->
+                        subst, (snd (Constr.destApp o)).(Array.length targs + i)
+                      end
+                  end }
+            | _ -> EGuess
+          end
+        | _ -> EGuess
+      } in
+    let rec irefine_rtree rt n =
+      let guess_terms =
+        Sequence.filter (eguess rt.ty n) ~f:begin fun term ->
+          try
+            List.iter rt.examples ~f:begin fun (subst, output) ->
+              Reduction.conv orig_env (Vars.replace_vars subst term) output
+            end;
+            true
+          with Reduction.NotConvertible ->
+            false
+        end in
+      let entry = lookup_cache rt.ty in
+      let ctor_terms =
+        begin
+          match rt.branch with
+          | EGuess -> Sequence.empty
+          | IRefine_ctor c ->
+            match c.args with
+            | [] when n = 0 -> Sequence.singleton c.ctor
+            | _ ->
+              let open Sequence.Monad_infix in
+              List.map c.args ~f:begin fun sub_rt ->
+                (* important: evaluate this first *)
+                let prev_terms = sub_rt.terms in
+                [prev_terms; irefine_rtree sub_rt n]
+              end
+              |> List.all
+              |> List.tl_exn (* drop all-prev args *)
+              |> Sequence.of_list
+              >>= fun multi_args ->
+                Sequence.all multi_args
+                >>| fun args -> red (Term.applist (c.ctor, args))
+        end
+        |> Sequence.filter ~f:begin fun tm ->
+          Result.is_ok (Hash_set.strict_add entry.cumul tm)
+        end in
+      let new_terms =
+        Sequence.memoize (Sequence.append guess_terms ctor_terms) in
+      rt.terms <- Sequence.memoize (Sequence.append rt.terms new_terms);
+      new_terms in
+    let synth =
+      match exs with
+      | [] -> irefine_empty hole_ty
+      | _ -> irefine_rtree (build_rtree hole_ty exs) in
     let open Sequence.Monad_infix in
     Sequence.unfold ~init:0 ~f:(fun i -> Some (i, i + 1))
     |> take_option levels
-    >>= synth hole_ty
-    |> Sequence.filter ~f:begin fun term ->
-      try
-        List.iter exs ~f:begin fun (subst, output) ->
-          Reduction.conv orig_env (Vars.replace_vars subst term) output
-        end;
-        true
-      with Reduction.NotConvertible ->
-        false
-    end
+    >>= synth
     |> take_option k
     >>| begin fun term ->
       Pp.string_of_ppcmds (Printer.pr_constr_env par_env'' par_sigma'' term)
