@@ -318,8 +318,8 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
                 Sequence.of_list (Hashtbl.find_multi atoms ty)
               end else begin
                 if m > len then
-                  (* Force previous levels to update cumul *)
-                  Sequence.iter (eg (m - 1)) ~f:ignore;
+                  (* extend levels to length m *)
+                  ignore (eg (m - 1));
                 let open Sequence.Monad_infix in
                 let prods = Sequence.of_list
                   (Hash_set.to_list (find_returning ty)) in
@@ -348,8 +348,8 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
     and irefine_empty ty n =
       let entry = lookup_cache ty in
       let build_terms () =
+        (* extend levels to length n+1 *)
         let guess_terms = eguess ty n in
-        Sequence.iter guess_terms ~f:ignore;
         let ctors = get_ctors ty in
         let ctor_terms =
           begin
