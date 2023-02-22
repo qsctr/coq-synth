@@ -302,6 +302,9 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
         { levels = Res.Array.empty ()
         ; cumul = Hash_set.create (module ConstrHash) }
       end in
+    let dedup entry = Sequence.filter ~f:begin fun tm ->
+      Result.is_ok (Hash_set.strict_add entry.cumul tm)
+    end in
     let rec eguess ty n =
       let entry = lookup_cache ty in
       let len = Res.Array.length entry.levels in
@@ -337,9 +340,7 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
                         red (Constr.mkApp (prod_tm, [|arg_tm|]))
               end
             end
-            |> Sequence.filter ~f:begin fun tm ->
-              Result.is_ok (Hash_set.strict_add entry.cumul tm)
-            end
+            |> dedup entry
             |> Sequence.memoize in
           Res.Array.add_one entry.levels
             {eguess_terms = terms; irefine_empty_terms = None};
@@ -364,9 +365,7 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
                 >>| fun args -> red (Term.applist (c.ctor, args))
               end
           end
-          |> Sequence.filter ~f:begin fun tm ->
-            Result.is_ok (Hash_set.strict_add entry.cumul tm)
-          end in
+          |> dedup entry in
         let terms = Sequence.memoize (Sequence.append guess_terms ctor_terms) in
         (Res.Array.get entry.levels n).irefine_empty_terms <- Some terms;
         terms in
@@ -439,9 +438,7 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
                 Sequence.all multi_args
                 >>| fun args -> red (Term.applist (c.ctor, args))
         end
-        |> Sequence.filter ~f:begin fun tm ->
-          Result.is_ok (Hash_set.strict_add entry.cumul tm)
-        end in
+        |> dedup entry in
       let new_terms =
         Sequence.memoize (Sequence.append guess_terms ctor_terms) in
       rt.terms <- Sequence.memoize (Sequence.append rt.terms new_terms);
