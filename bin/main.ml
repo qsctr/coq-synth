@@ -5,10 +5,8 @@ examples k levels debug =
   Coq_synth.debug := debug;
   Coq_synth.with_error_handler (fun e -> Error (`Msg e)) @@ fun () ->
     let sid = Coq_synth.load ~logical_dir ~physical_dir ~module_name in
-    Base.Sequence.iter
-      (Coq_synth.synthesize ~sid ~hole_type ~params ~extra_exprs ~examples
-        ~k ~levels)
-      ~f:print_endline;
+    Coq_synth.synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k
+      ~levels;
     Ok ()
 
 let nonneg =

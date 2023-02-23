@@ -180,6 +180,17 @@ let load ~logical_dir ~physical_dir ~module_name =
   Constrextern.print_no_symbol := true;
   List.last_exn sids
 
+let plain_formatter =
+  let open Caml in
+  let ofs = Format.get_formatter_out_functions () in
+  let out_space _ = ofs.out_string " " 0 1 in
+  Format.formatter_of_out_functions
+    { ofs with
+      out_newline = ignore
+    ; out_spaces = out_space
+    ; out_indent = out_space
+    }
+
 let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
   let query_opt : Serapi_protocol.query_opt =
     { preds = []
@@ -332,7 +343,10 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
         false
     end
     |> take_option k
-    >>| begin fun term ->
-      Pp.string_of_ppcmds (Printer.pr_constr_env par_env'' par_sigma'' term)
+    |> Sequence.iter ~f:begin fun term ->
+      Pp.pp_with plain_formatter
+        (Printer.pr_constr_env par_env'' par_sigma'' term);
+      Caml.Format.pp_print_flush plain_formatter ();
+      Caml.print_char '\n'
     end
   | _ -> assert false
