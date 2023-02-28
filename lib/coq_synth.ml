@@ -30,13 +30,9 @@ type term_cache_entry =
   { levels : enum_level Res.Array.t
   ; cumul : Constr.t Hash_set.t }
 
-type 'a ctor_struct =
+type ctor_type =
   { ctor : Constr.t
-  ; args : 'a list }
-
-type ctors =
-  { nullary : Constr.t Sequence.t
-  ; nonnullary : Constr.types ctor_struct Sequence.t }
+  ; rev_args : Constr.types list }
 
 type rtree =
   { ty : Constr.types
@@ -45,7 +41,7 @@ type rtree =
   ; branch : rtree_branch }
 and rtree_branch =
   | EGuess
-  | IRefine_ctor of rtree ctor_struct
+  | IRefine_ctor of { ctor : Constr.t; args : rtree list }
 
 module ConstrHash = struct
   include Constr
@@ -56,6 +52,12 @@ let take_option on seq =
   match on with
   | Some n -> Sequence.take seq n
   | None -> seq
+
+let rec drop_prefix pre list =
+  match pre, list with
+  | [], _ -> Some list
+  | p :: ps, x :: xs when Constr.equal p x -> drop_prefix ps xs
+  | _ -> None
 
 let string_of_user_error = function
   | Example_arity_error e ->
@@ -240,7 +242,7 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
           [name, parse_check_ex_constr (Parameter_target name) ty subst inp]
       end
       |> function
-      | Ok subst ->
+      | List.Or_unequal_lengths.Ok subst ->
         subst, parse_check_ex_constr Hole_target hole_ty subst output
       | Unequal_lengths ->
         raise (User_error (Example_arity_error {params = pars; inputs}))
@@ -273,28 +275,22 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
     let ctors = Hashtbl.create (module ConstrHash) in
     let infer_ctor c targs = Arguments_renaming.rename_typing par_env''
       (red (Constr.mkApp (Constr.mkConstruct c, targs))) in
-    let rec get_arg_types ty =
-      match Constr.kind ty with
-      | Prod (_, arg_ty, ret_ty) -> arg_ty :: get_arg_types ret_ty
-      | _ -> [] in
+    let decompose_prod_types ty =
+      let rev_binders, ret_ty = Term.decompose_prod ty in
+      List.map ~f:snd rev_binders, ret_ty in
     let get_ctors ty = Hashtbl.find_or_add ctors ty ~default:begin fun () ->
       let tcon, targs = Constr.decompose_appvect ty in
       match Constr.kind tcon with
       | Ind (ind, _) ->
         let consnames = (Environ.lookup_mind (fst ind) par_env'')
           .mind_packets.(snd ind).mind_consnames in
-        let nullary, nonnullary =
-          List.range ~stop:`inclusive 1 (Array.length consnames)
-          |> List.partition_map ~f:begin fun i ->
-            let j = infer_ctor
-              (Names.ith_constructor_of_inductive ind i) targs in
-            match get_arg_types j.uj_type with
-            | [] -> `Fst j.uj_val
-            | args -> `Snd {ctor = j.uj_val; args}
-          end in
-        { nullary = Sequence.of_list nullary
-        ; nonnullary = Sequence.of_list nonnullary }
-      | _ -> {nullary = Sequence.empty; nonnullary = Sequence.empty}
+        List.init (Array.length consnames) ~f:begin fun i ->
+          let j = infer_ctor
+            (Names.ith_constructor_of_inductive ind (i + 1)) targs in
+          {ctor = j.uj_val; rev_args = fst (decompose_prod_types j.uj_type)}
+        end
+        |> Sequence.of_list
+      | _ -> Sequence.empty
     end in
     let term_cache = Hashtbl.create (module ConstrHash) in
     let lookup_cache ty =
@@ -315,9 +311,6 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
           let terms =
             begin
               if m = 0 then begin
-                (* ty may match the type of a constructor of a yet unsynthesized
-                   type *)
-                (* ignore (lookup_cache (Term.strip_prod ty)); *)
                 Sequence.of_list (Hashtbl.find_multi atoms ty)
               end else begin
                 if m > len then
@@ -351,19 +344,24 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
       let build_terms () =
         (* extend levels to length n+1 *)
         let guess_terms = eguess ty n in
-        let ctors = get_ctors ty in
+        let goal_rev_args, goal_ty = decompose_prod_types ty in
+        let valid_ctors =
+          Sequence.filter_map (get_ctors goal_ty) ~f:begin fun c ->
+            drop_prefix goal_rev_args c.rev_args
+            |> Option.map ~f:(fun rev_args' -> {c with rev_args = rev_args'})
+          end in
         let ctor_terms =
           begin
+            let open Sequence.Monad_infix in
             if n = 0 then
-              ctors.nullary
+              Sequence.filter valid_ctors ~f:(fun c -> List.is_empty c.rev_args)
+              >>| fun c -> c.ctor
             else
-              let open Sequence.Monad_infix in
-              ctors.nonnullary
-              >>= begin fun c ->
-                List.map c.args ~f:(fun arg_ty -> irefine_empty arg_ty (n - 1))
+              valid_ctors >>= fun c ->
+                List.rev_map c.rev_args
+                  ~f:(fun arg_ty -> irefine_empty arg_ty (n - 1))
                 |> Sequence.all
                 >>| fun args -> red (Term.applist (c.ctor, args))
-              end
           end
           |> dedup entry in
         let terms = Sequence.memoize (Sequence.append guess_terms ctor_terms) in
@@ -380,7 +378,8 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
       ; examples = xs
       ; terms = Sequence.empty
       ; branch =
-        let tcon, targs = Constr.decompose_appvect ty in
+        let goal_rev_args, goal_ty = decompose_prod_types ty in
+        let tcon, targs = Constr.decompose_appvect goal_ty in
         match xs with
         | x :: xs' when Constr.isInd tcon -> begin
             let out_fun_kind (_, o) =
@@ -395,7 +394,11 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
               IRefine_ctor
                 { ctor = c_j.uj_val
                 ; args =
-                  List.mapi (get_arg_types c_j.uj_type) ~f:begin fun i arg_ty ->
+                  fst (decompose_prod_types c_j.uj_type)
+                  |> drop_prefix goal_rev_args
+                  |> Option.value_exn
+                  |> List.rev
+                  |> List.mapi ~f:begin fun i arg_ty ->
                     build_rtree arg_ty @@
                       List.map xs ~f:begin fun (subst, o) ->
                         subst, (snd (Constr.destApp o)).(Array.length targs + i)
