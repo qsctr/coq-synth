@@ -6,5 +6,4 @@
   coq-serapi.serapi_v8_11
   coq-serapi.serlib
   coq-serapi.sertop_v8_11
-  res)
- (preprocess (pps ppx_pipebang)))
+  res))

@@ -242,7 +242,7 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
           [name, parse_check_ex_constr (Parameter_target name) ty subst inp]
       end
       |> function
-      | List.Or_unequal_lengths.Ok subst ->
+      | Ok subst ->
         subst, parse_check_ex_constr Hole_target hole_ty subst output
       | Unequal_lengths ->
         raise (User_error (Example_arity_error {params = pars; inputs}))
@@ -273,11 +273,13 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
       end in
     let par_sigma'' = Evd.from_env par_env'' in
     let ctors = Hashtbl.create (module ConstrHash) in
-    let infer_ctor c targs = Arguments_renaming.rename_typing par_env''
-      (red (Constr.mkApp (Constr.mkConstruct c, targs))) in
     let decompose_prod_types ty =
       let rev_binders, ret_ty = Term.decompose_prod ty in
       List.map ~f:snd rev_binders, ret_ty in
+    let infer_ctor c targs =
+      let j = Arguments_renaming.rename_typing par_env''
+        (red (Constr.mkApp (Constr.mkConstruct c, targs))) in
+      {ctor = j.uj_val; rev_args = fst (decompose_prod_types j.uj_type)} in
     let get_ctors ty = Hashtbl.find_or_add ctors ty ~default:begin fun () ->
       let tcon, targs = Constr.decompose_appvect ty in
       match Constr.kind tcon with
@@ -285,9 +287,8 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
         let consnames = (Environ.lookup_mind (fst ind) par_env'')
           .mind_packets.(snd ind).mind_consnames in
         List.init (Array.length consnames) ~f:begin fun i ->
-          let j = infer_ctor
-            (Names.ith_constructor_of_inductive ind (i + 1)) targs in
-          {ctor = j.uj_val; rev_args = fst (decompose_prod_types j.uj_type)}
+          (* note: constructor indices start at 1 *)
+          infer_ctor (Names.ith_constructor_of_inductive ind (i + 1)) targs
         end
         |> Sequence.of_list
       | _ -> Sequence.empty
@@ -390,13 +391,11 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
               | _ -> false in
             match out_fun_kind x with
             | Construct (c, _) when List.for_all xs' ~f:(same_construct c) ->
-              let c_j = infer_ctor c targs in
+              let c_type = infer_ctor c targs in
               IRefine_ctor
-                { ctor = c_j.uj_val
+                { ctor = c_type.ctor
                 ; args =
-                  fst (decompose_prod_types c_j.uj_type)
-                  |> drop_prefix goal_rev_args
-                  |> Option.value_exn
+                  Option.value_exn (drop_prefix goal_rev_args c_type.rev_args)
                   |> List.rev
                   |> List.mapi ~f:begin fun i arg_ty ->
                     build_rtree arg_ty @@
