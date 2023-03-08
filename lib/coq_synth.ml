@@ -418,7 +418,6 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
           with Reduction.NotConvertible ->
             false
         end in
-      let entry = lookup_cache rt.ty in
       let ctor_terms =
         begin
           match rt.branch with
@@ -439,8 +438,7 @@ let synthesize ~sid ~hole_type ~params ~extra_exprs ~examples ~k ~levels =
               >>= fun multi_args ->
                 Sequence.all multi_args
                 >>| fun args -> red (Term.applist (c.ctor, args))
-        end
-        |> dedup entry in
+        end in
       let new_terms =
         Sequence.memoize (Sequence.append guess_terms ctor_terms) in
       rt.terms <- Sequence.memoize (Sequence.append rt.terms new_terms);
